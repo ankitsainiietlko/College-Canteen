@@ -1,24 +1,50 @@
-const express = require("express");
-const mongoose = require("mongoose");
-const cors = require("cors");
 require("dotenv").config();
 
-const authRoutes = require("./routes/auth");
-const foodRoutes = require("./routes/food");
-const orderRoutes = require("./routes/order");
+const mongoose = require("mongoose");
+const createApp = require("./app");
+const config = require("./config");
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+const app = createApp();
+const { attachRealtime } = require("./realtime");
 
-// Routes
-app.use("/api/auth", authRoutes);
-app.use("/api/food", foodRoutes);
-app.use("/api/orders", orderRoutes);
+async function start() {
+  try {
+    await mongoose.connect(config.mongoUri, {
+      // Fail fast with a clear message rather than hanging for the default
+      // 30s when MongoDB is unreachable.
+      serverSelectionTimeoutMS: 5000,
+    });
+    console.log("MongoDB connected");
+  } catch (err) {
+    console.error("MongoDB connection failed:", err.message);
+    console.error(`Tried: ${config.mongoUri}`);
+    console.error("Is MongoDB running? Set MONGO_URI in backend/.env if it differs.");
+    // Exit rather than serving traffic that cannot persist anything.
+    process.exit(1);
+  }
 
-// MongoDB connection
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log("MongoDB connected"))
-  .catch(err => console.error(err));
+  const server = app.listen(config.port, () => {
+    console.log(`Server running on port ${config.port} [${config.nodeEnv}]`);
+  });
 
-app.listen(process.env.PORT || 5000, () => console.log(`Server running on port ${process.env.PORT || 5000}`));
+  // Optional notification transport. REST is unaffected if this is disabled.
+  attachRealtime(server);
+
+  const shutdown = (signal) => {
+    console.log(`\n${signal} received, shutting down gracefully...`);
+    server.close(async () => {
+      await mongoose.disconnect();
+      process.exit(0);
+    });
+    // Do not hang forever on a stuck connection.
+    setTimeout(() => process.exit(1), 10_000).unref();
+  };
+
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+start();
+
+// Exported for tests and tooling.
+module.exports = app;
